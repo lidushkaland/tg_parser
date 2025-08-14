@@ -2,7 +2,7 @@
 from telethon import TelegramClient
 from telethon.tl.types import Message
 from datetime import timezone
-import csv, re
+import csv, re, requests
 
 # ---------- конфиг ----------
 # читаем config.txt (рядом с parser.py)
@@ -34,16 +34,12 @@ with open('channels.txt', 'r', encoding='utf-8') as f:
 def clean_text(t: str) -> str:
     if not t:
         return ''
-    # убираем лишние пробелы
     t = t.replace('\u200b', '').replace('\xa0', ' ')
-    # убираем html-теги если вдруг прилетели
     t = re.sub(r'<[^>]+>', '', t)
-    # схлопываем многоточия/переводы
     t = re.sub(r'\n{3,}', '\n\n', t).strip()
     return t
 
 def first_sentence(t: str, max_len=140) -> str:
-    # берём первую фразу до точки/восклиц/вопроса, ограничиваем длину
     if not t:
         return ''
     m = re.split(r'(?<=[\.\!\?])\s+', t)
@@ -56,7 +52,6 @@ def title_from_text(t: str, max_words=7) -> str:
     if not t:
         return 'НОВОЕ'
     words = re.findall(r'\w+|\S', t, flags=re.UNICODE)
-    # берём первые смысловые слова
     pick = []
     wcount = 0
     for w in words:
@@ -66,12 +61,10 @@ def title_from_text(t: str, max_words=7) -> str:
         if wcount >= max_words:
             break
     title = ' '.join(pick).upper()
-    # подчистим
     title = re.sub(r'[\.\,\-\–\—\:]+$', '', title)
     return title or 'НОВОЕ'
 
 def emoji_hint(t: str) -> str:
-    """очень лёгкий маппинг по ключевым словам, чтобы добавить вайба"""
     s = t.lower()
     if any(k in s for k in ['ai','нейросет','искусствен','gpt','model']):
         return '🤖'
@@ -86,33 +79,23 @@ def emoji_hint(t: str) -> str:
     return '✨'
 
 def make_styled(text: str, ch: str, date, views: int, fwds: int, replies: int, link: str) -> str:
-    """
-    генерим markdown для Telegram (Parse Mode = Markdown)
-    — хук
-    — 2-3 живых пункта
-    — мини-метрики
-    — ссылка
-    """
     t = clean_text(text)
     hook = first_sentence(t)
     title = title_from_text(t)
     emo = emoji_hint(t)
 
-    # быстрые пункты: вторую/третью строки делаем короткими
     body = t.split('\n')
     bullets = []
     for line in body[1:]:
         line = line.strip()
         if not line:
             continue
-        # обрежем длинноты
         if len(line) > 120:
             line = line[:118].rstrip() + '…'
         bullets.append(f"- {line}")
         if len(bullets) >= 3:
             break
 
-    # сборка markdown
     md = []
     md.append(f"*{emo} {title}*")
     if hook:
@@ -127,6 +110,20 @@ def make_styled(text: str, ch: str, date, views: int, fwds: int, replies: int, l
 def tme_link(username: str, mid: int) -> str:
     return f"https://t.me/{username}/{mid}"
 
+# ---------- отправка в Telegram ----------
+BOT_TOKEN = "ТОКЕН_ТВОЕГО_БОТА"
+CHAT_ID = "ID_ТВОЕГО_ЧАТА"  # например -1001234567890
+
+def send_message_to_tg(text: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    requests.post(url, data=data)
+
+def send_file_to_tg(file_path: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    with open(file_path, 'rb') as f:
+        requests.post(url, data={"chat_id": CHAT_ID}, files={"document": f})
+
 # ---------- основной код ----------
 client = TelegramClient('session', API_ID, API_HASH)
 
@@ -140,9 +137,7 @@ async def main():
             async for msg in client.iter_messages(entity, limit=LIMIT_PER_CH):
                 if not isinstance(msg, Message):
                     continue
-                # оригинал
                 text = clean_text(msg.message or "")
-                # метрики
                 views   = getattr(msg, "views", 0) or 0
                 forwards= getattr(msg, "forwards", 0) or 0
                 repl    = getattr(getattr(msg, "replies", None), "replies", 0) or 0
@@ -162,11 +157,16 @@ async def main():
                     "original_text": text,
                     "styled_text": styled
                 })
+
+                # отправляем адаптированный текст в ТГ
+                send_message_to_tg(styled)
+
         except Exception as e:
             print(f"[{username}] error: {e}")
 
-    # сохраняем CSV в utf-8
-    with open('output.csv', 'w', newline='', encoding='utf-8') as f:
+    # сохраняем CSV
+    csv_path = 'output.csv'
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(
             f,
             fieldnames=["channel","message_id","date_utc","views","forwards","replies","link","original_text","styled_text"]
@@ -174,40 +174,11 @@ async def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"✅ Saved output.csv (rows={len(rows)})")
+    print(f"✅ Saved {csv_path} (rows={len(rows)})")
+
+    # отправляем файл в ТГ
+    send_file_to_tg(csv_path)
 
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
-from telethon import TelegramClient
-import csv
-
-# Читаем настройки из config.txt
-config = {}
-with open('config.txt', 'r') as f:
-    for line in f:
-        key, value = line.strip().split('=')
-        config[key] = value
-
-api_id = int(config['API_ID'])
-api_hash = config['API_HASH']
-phone = config['PHONE']
-limit_per_ch = int(config['LIMIT_PER_CH'])
-
-client = TelegramClient('session_name', api_id, api_hash)
-
-async def main():
-    with open('channels.txt', 'r') as f:
-        channels = [line.strip() for line in f]
-
-    with open('output.csv', 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['Channel', 'Message'])
-
-        for ch in channels:
-            async for message in client.iter_messages(ch, limit=limit_per_ch):
-                writer.writerow([ch, message.text or "MEDIA/EMPTY"])
-
-with client:
-    client.loop.run_until_complete(main())
-
